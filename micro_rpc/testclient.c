@@ -379,7 +379,6 @@ static inline int conn_receive(struct core *c, struct connection *co)
         } else if (ret == 0) {
             /* end of stream */
             conn_close(c, co);
-            printf("conn_close\n");
             return -1;
         } else if (ret < 0 && errno != EAGAIN) {
             /* errror, close connection */
