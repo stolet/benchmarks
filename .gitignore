@@ -1,5 +1,6 @@
 *.o
 *.d
+micro_rpc/testclient_linux_bursty
 micro_rpc/testclient_linux
 micro_rpc/echoserver_linux
 micro_rpc/echoserver_ll

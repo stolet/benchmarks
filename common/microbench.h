@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <utils.h>
 
+
 static inline uint64_t rdtsc(void)
 {
     uint32_t eax, edx;
