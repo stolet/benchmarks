@@ -651,6 +651,7 @@ static void *thread_run(void *arg)
     struct connection *co;
     ssctx_t sc;
     ss_epev_t *evs;
+    uint8_t burst_mode = 0;
 
     prepare_core(c);
 
@@ -676,6 +677,17 @@ static void *thread_run(void *arg)
         if ((ret = ss_epoll_wait(sc, ep, evs, num_evs, -1)) < 0) {
             fprintf(stderr, "[%d] epoll_wait failed\n", cn);
             abort();
+        }
+
+        gettimeofday(&cur_ts, NULL);
+        if ((cur_ts.tv_sec - burst_start > burst_length) 
+                && bursty && burst_mode == 1) {
+            burst_mode = 0;
+            burst_end = cur_ts.tv_sec;
+        } else if ((cur_ts.tv_sec - burst_end > burst_interval) 
+                && bursty && burst_mode == 0) {
+            burst_mode = 1;
+            burst_start = cur_ts.tv_sec;
         }
 
         for (i = 0; i < ret; i++) {
