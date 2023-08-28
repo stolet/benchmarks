@@ -72,7 +72,7 @@
 
 #define HIST_START_US 0
 #define HIST_BUCKET_US 1
-#define HIST_BUCKETS (256 * 1024)
+#define HIST_BUCKETS (1024 * 1024)
 
 #define MAX_FILE_PATH_SIZE 200
 
@@ -85,9 +85,6 @@ enum conn_state {
 
 static char *dir_path;
 static char *file_name;
-static uint8_t bursty = 0;
-static uint64_t burst_length = 0;
-static uint64_t burst_interval = 0;
 static uint32_t max_pending = 64;
 static uint32_t max_conn_pending = 16;
 static uint32_t message_size = 64;
@@ -500,7 +497,7 @@ static inline int conn_send(struct core *c, struct connection *co)
 }
 
 static inline void conn_events(struct core *c, struct connection *co,
-        uint32_t events, uint8_t burst_mode)
+        uint32_t events)
 {
     int status;
     socklen_t slen;
@@ -547,10 +544,8 @@ static inline void conn_events(struct core *c, struct connection *co,
     }
 
     /* send out requests */
-    if (burst_mode) {
-        if (conn_send(c, co) != 0) {
-            return;
-        }
+    if (conn_send(c, co) != 0) {
+        return;
     }
 
 
@@ -654,11 +649,8 @@ static void *thread_run(void *arg)
     struct core *c = arg;
     int i, cn, ret, ep, num_evs;
     struct connection *co;
-    struct timeval cur_ts;
-    time_t burst_start = 0, burst_end = 0;
     ssctx_t sc;
     ss_epev_t *evs;
-    uint8_t burst_mode = 1;
 
     prepare_core(c);
 
@@ -686,20 +678,9 @@ static void *thread_run(void *arg)
             abort();
         }
 
-        gettimeofday(&cur_ts, NULL);
-        if ((cur_ts.tv_sec - burst_end > burst_interval) 
-                && bursty && burst_mode == 0) {
-            burst_mode = 1;
-            burst_start = cur_ts.tv_sec;
-        } else if ((cur_ts.tv_sec - burst_start > burst_length) 
-                && bursty && burst_mode == 1) {
-            burst_mode = 0;
-            burst_end = cur_ts.tv_sec;
-        }
-
         for (i = 0; i < ret; i++) {
             co = evs[i].data.ptr;
-            conn_events(c, co, evs[i].events, burst_mode);
+            conn_events(c, co, evs[i].events);
         }
     }
 }
@@ -870,23 +851,11 @@ int main(int argc, char *argv[])
     }
 
     if (argc >= 12) {
-        bursty = atoi(argv[11]);
+        dir_path = argv[11];
     }
 
     if (argc >= 13) {
-        burst_length = atoi(argv[12]);
-    }
-
-    if (argc >= 14) {
-        burst_interval = atoi(argv[13]);
-    }
-
-    if (argc >= 15) {
-        dir_path = argv[14];
-    }
-
-    if (argc >= 16) {
-        file_name = argv[15];
+        file_name = argv[12];
     }
 
     assert(sizeof(*cs) % 64 == 0);
