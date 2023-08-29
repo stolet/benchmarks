@@ -87,8 +87,6 @@ enum conn_state {
     CONN_CLOSING = 3,
 };
 
-static char *dir_path;
-static char *file_name;
 static uint32_t normal_rate = 10000; // Normal rate per flow in kbps
 static uint32_t burst_rate = 10000; // Burst rate per flow in kbps
 static uint64_t burst_length = 0;
@@ -806,52 +804,6 @@ static inline int hist_value(size_t i)
     return i * HIST_BUCKET_US + HIST_START_US;
 }
 
-static void save_hist(uint32_t *hist)
-{
-  FILE *f;
-  int i, ret;
-  char temp_path[MAX_FILE_PATH_SIZE] = "";
-  char file_path[MAX_FILE_PATH_SIZE] = "";
-
-  strcat(temp_path, dir_path);
-  strcat(temp_path, "temp");
-
-  strcat(file_path, dir_path);
-  strcat(file_path, file_name);
-  f = fopen(temp_path, "w");
-
-  if (f == NULL)
-  {
-    perror("error opening file");
-    exit(-1);
-  }
-
-  for (i = 0; i < HIST_BUCKETS; i++)
-  {
-    ret = fprintf(f, "%d %d\n", i, hist[i]);
-    if (ret < 0)
-    {
-        perror("error writing to file");
-        exit(-1);
-    }
-  }
-
-  ret = fclose(f);
-  if (ret < 0)
-  {
-    perror("error closing file");
-    exit(-1);
-  }
-
-
-  ret = rename(temp_path, file_path);
-  if (ret < 0)
-  {
-    perror("error renaming file");
-    exit(-1);
-  }
-}
-
 static int parse_addrs(const char *ip, char *ports)
 {
   size_t i;
@@ -900,12 +852,11 @@ int main(int argc, char *argv[])
 
     setlocale(LC_NUMERIC, "");
 
-    if (argc < 5 || argc > 18) {
+    if (argc < 5 || argc > 16) {
         fprintf(stderr, "Usage: ./testclient IP PORT CORES CONFIG "
             "[MESSAGE-SIZE] [MAX-PENDING] [TOTAL-CONNS] "
             "[OPENALL-DELAY] [MAX-MSGS-CONN] [MAX-PEND-CONNS] "
-            "[NORMAL-RATE] [BURST-RATE] [BURST-LENGTH] [BURST-INTERVAL] "
-            "[LATENCY-FILE-DIR] [LATENCY-FILE]\n");
+            "[NORMAL-RATE] [BURST-RATE] [BURST-LENGTH] [BURST-INTERVAL]\n");
         return EXIT_FAILURE;
     }
 
@@ -960,14 +911,6 @@ int main(int argc, char *argv[])
 
     if (argc >= 15) {
         burst_interval = atoi(argv[14]);
-    }
-
-    if (argc >= 16) {
-        dir_path = argv[15];
-    }
-
-    if (argc >= 17) {
-        file_name = argv[16];
     }
 
     assert(sizeof(*cs) % 64 == 0);
@@ -1025,7 +968,6 @@ int main(int argc, char *argv[])
                 sizeof(fracs) / sizeof(fracs[0]));
 
         ts = util_rdtsc(); 
-        save_hist(hist);
         printf("TP: ts=%ld  n_messages=%ld  total=%'.2Lf mbps  "
                 "50p=%d us  90p=%d us  95p=%d us  "
                 "99p=%d us  99.9p=%d us  99.99p=%d us  flows=%lu",
