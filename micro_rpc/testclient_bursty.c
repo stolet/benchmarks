@@ -77,6 +77,7 @@
 #define HIST_BUCKET_US 1
 #define HIST_BUCKETS (1024 * 1024)
 #define QMAN_SKIPLIST_LEVELS 4
+#define QMAN_MAX_CHUNK 1500
 
 #define MAX_FILE_PATH_SIZE 200
 
@@ -188,7 +189,7 @@ static inline uint64_t read_cnt(uint64_t *p)
 static inline void conn_connect(struct core *c, struct connection *co, uint8_t burst_mode)
 {
     int fd, cn, ret;
-    uint32_t co_rate;
+    uint32_t co_rate, qman_avail, max_chunk;
     ssctx_t sc;
     ss_epev_t ev;
 
@@ -235,10 +236,18 @@ static inline void conn_connect(struct core *c, struct connection *co, uint8_t b
             co_rate = burst_rate;
         else
             co_rate = normal_rate;
+    
+        qman_avail = (max_pending - co->pending) * message_size;
+        max_chunk = qman_avail;
+	if (max_pending == 0)
+	{
+            qman_avail = UINT32_MAX;
+	    max_chunk = QMAN_MAX_CHUNK;
+	}
 
         qman_set(&c->qman, co->id, co_rate, 
-            (max_pending - co->pending) * message_size, 
-            (max_pending - co->pending) * message_size,
+            qman_avail, 
+            max_chunk,
             QMAN_SET_RATE | QMAN_SET_MAXCHUNK | QMAN_SET_AVAIL);
     } else if (ret < 0 && errno == EINPROGRESS) {
         /* still going on */
@@ -368,7 +377,7 @@ static inline int conn_receive(struct core *c,
 {
     int fd, ret;
     int cn;
-    uint32_t co_rate;
+    uint32_t co_rate, qman_avail, max_chunk;
     uint64_t *rx_ts;
     void *rx_buf;
     ssctx_t sc;
@@ -428,9 +437,17 @@ static inline int conn_receive(struct core *c,
     else
         co_rate = normal_rate;
 
+    qman_avail = (max_pending - co->pending) * message_size;
+    max_chunk = qman_avail;
+    if (max_pending == 0)
+    {
+        qman_avail = UINT32_MAX;
+        max_chunk = QMAN_MAX_CHUNK;
+    }
+    
     qman_set(&c->qman, co->id, co_rate, 
-        (max_pending - co->pending) * message_size, 
-        (max_pending - co->pending) * message_size, 
+        qman_avail, 
+        max_chunk, 
         QMAN_SET_RATE | QMAN_SET_AVAIL | QMAN_SET_MAXCHUNK);
 
     if (co->state == CONN_CLOSING && co->pending == 0) {
@@ -446,7 +463,7 @@ static inline int conn_send(struct core *c,
 {
     int fd, ret, wait_wr;
     int cn;
-    uint32_t co_rate;
+    uint32_t co_rate, qman_avail, max_chunk;
     uint64_t *tx_ts;
     void *tx_buf;
     ssctx_t sc;
@@ -515,10 +532,18 @@ static inline int conn_send(struct core *c,
         co_rate = burst_rate;
     else
         co_rate = normal_rate;
+    
+    qman_avail = (max_pending - co->pending) * message_size;
+    max_chunk = qman_avail;
+    if (max_pending == 0)
+    {
+        qman_avail = UINT32_MAX;
+	max_chunk = QMAN_MAX_CHUNK;
+    }
 
     qman_set(&c->qman, co->id, co_rate, 
-        (max_pending - co->pending) * message_size, 
-        (max_pending - co->pending) * message_size, 
+        qman_avail, 
+        max_chunk, 
         QMAN_SET_RATE | QMAN_SET_AVAIL | QMAN_SET_MAXCHUNK);
 
     /* make sure we epoll for write iff we're actually blocked on writes */
@@ -549,7 +574,7 @@ static inline void conn_events(struct core *c, struct connection *co,
         uint32_t events, uint8_t burst_mode)
 {
     int status;
-    uint32_t co_rate;
+    uint32_t co_rate, qman_avail, max_chunk;
     socklen_t slen;
 #ifdef PRINT_STATS
     uint64_t tsc;
@@ -588,10 +613,18 @@ static inline void conn_events(struct core *c, struct connection *co,
             co_rate = burst_rate;
         else
             co_rate = normal_rate;
+        
+	qman_avail = (max_pending - co->pending) * message_size;
+	max_chunk = qman_avail;
+	if (max_pending == 0)
+	{
+          qman_avail = UINT32_MAX;
+	  max_chunk = QMAN_MAX_CHUNK;
+   	}
 
         qman_set(&c->qman, co->id, co_rate, 
-            (max_pending - co->pending) * message_size, 
-            (max_pending - co->pending) * message_size,
+            qman_avail, 
+            max_chunk,
             QMAN_SET_RATE | QMAN_SET_MAXCHUNK | QMAN_SET_AVAIL);
         c->conn_open++;
     }
@@ -626,7 +659,7 @@ static inline void connect_more(struct core *c, uint8_t burst_mode)
 static void open_all(struct core *c, uint8_t burst_mode)
 {
     int i, ret, ep, status;
-    uint32_t co_rate;
+    uint32_t co_rate, qman_avail, max_chunk;
     struct connection *co;
     ssctx_t sc;
     socklen_t slen;
@@ -682,9 +715,17 @@ static void open_all(struct core *c, uint8_t burst_mode)
 	    else
 	        co_rate = normal_rate;
 	    
+            qman_avail = (max_pending - co->pending) * message_size;
+	    max_chunk = qman_avail;
+            if (max_pending == 0)
+            {
+                qman_avail = UINT32_MAX;
+		max_chunk = QMAN_MAX_CHUNK;
+            }
+	 
 	    qman_set(&c->qman, co->id, co_rate, 
-                (max_pending - co->pending) * message_size, 
-                (max_pending - co->pending) * message_size,
+                qman_avail, 
+                max_chunk,
                 QMAN_SET_RATE | QMAN_SET_MAXCHUNK | QMAN_SET_AVAIL);
 
             ev.data.ptr = co;
