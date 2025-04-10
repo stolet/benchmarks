@@ -55,6 +55,7 @@
 #endif
 
 #define MIN(a,b) ((b) < (a) ? (b) : (a))
+#define MAX(a,b) ((b) > (a) ? (b) : (a))
 
 #define CONN_DEBUG(c, co, x...) do { } while (0)
 /*#define CONN_DEBUG(c, co, x...) \
@@ -75,6 +76,9 @@
 
 #define MAX_FILE_PATH_SIZE 200
 
+// Refill interval in nanoseconds
+#define REFILL_INTERVAL 1000000.0
+
 enum conn_state {
     CONN_CLOSED = 0,
     CONN_CONNECTING = 1,
@@ -89,6 +93,7 @@ static uint32_t max_conn_pending = 16;
 static uint32_t message_size = 64;
 static uint32_t num_conns = 8;
 static uint32_t num_msgs = 0;
+static uint32_t rate = 0;
 static uint32_t openall_delay = 0;
 static struct sockaddr_in *addrs;
 static size_t addrs_num;
@@ -102,6 +107,8 @@ struct connection {
     uint32_t tx_remain;
     uint32_t rx_remain;
     uint32_t tx_cnt;
+    uint32_t tokens;
+    struct timespec refill_ts;
     void *rx_buf;
     void *tx_buf;
     struct sockaddr_in *addr;
@@ -308,7 +315,13 @@ static void prepare_core(struct core *c)
         c->conns[i].tx_buf = buf + message_size;
         c->conns[i].state = CONN_CLOSED;
         c->conns[i].fd = -1;
-        c->conns[i].addr = &addrs[next_addr];
+	c->conns[i].addr = &addrs[next_addr];
+        c->conns[i].tokens = rate * (REFILL_INTERVAL / 1000000000.0);
+	if (clock_gettime(CLOCK_MONOTONIC_RAW, &c->conns[i].refill_ts) < 0)
+	{
+	    fprintf(stderr, "failed to get time for conn during init\n");
+	    abort();
+	}
 
         c->conns[i].next_closed = c->closed_conns;
         c->closed_conns = &c->conns[i];
@@ -404,17 +417,36 @@ static inline int conn_receive(struct core *c, struct connection *co)
     return 0;
 }
 
+static inline void conn_refill_tokens(struct connection *co, uint64_t elapsed)
+{
+    uint32_t new_tokens;
+
+    new_tokens = rate * (elapsed / 1000000000.0);
+    co->tokens = MIN(co->tokens + new_tokens, rate * (REFILL_INTERVAL / 1000000000.0));
+    assert(clock_gettime(CLOCK_MONOTONIC_RAW, &co->refill_ts) == 0);
+}
+
 static inline int conn_send(struct core *c, struct connection *co)
 {
     int fd, ret, wait_wr;
     int cn;
-    uint64_t *tx_ts;
+    uint64_t *tx_ts, elapsed_ns;
     void *tx_buf;
     ssctx_t sc;
     ss_epev_t ev;
+    struct timespec tp;
 #ifdef PRINT_STATS
     uint64_t tsc;
 #endif
+
+    assert(clock_gettime(CLOCK_MONOTONIC_RAW, &tp) == 0);
+    elapsed_ns = (tp.tv_sec - co->refill_ts.tv_sec) * 1000000000L + 
+        (tp.tv_nsec - co->refill_ts.tv_nsec); 
+
+    if (rate > 0 && elapsed_ns > REFILL_INTERVAL)
+    {
+	conn_refill_tokens(co, elapsed_ns);
+    }
 
     sc = c->sc;
     cn = c->id;
@@ -426,7 +458,14 @@ static inline int conn_send(struct core *c, struct connection *co)
     tx_ts = tx_buf;
     while ((co->pending < max_pending || max_pending == 0) &&
         (co->tx_cnt < num_msgs || num_msgs == 0) && ret > 0)
-    {
+    {   
+	if (rate > 0 && co->tokens == 0)
+	{
+	    wait_wr = 1;
+            assert(co->tx_remain == message_size);	    
+	    break;
+	}
+
         /* timestamp if starting a new message */
         if (co->tx_remain == message_size) {
             *tx_ts = get_nanos();
@@ -450,6 +489,7 @@ static inline int conn_send(struct core *c, struct connection *co)
                 /* sent whole message */
                 co->pending++;
                 co->tx_cnt++;
+		co->tokens--;
                 co->tx_remain = message_size;
                 if ((co->pending < max_pending || max_pending == 0) &&
                     (co->tx_cnt < num_msgs || num_msgs == 0))
@@ -541,7 +581,7 @@ static inline void conn_events(struct core *c, struct connection *co,
     {
         return;
     }
-
+    
     if (conn_send(c, co) != 0) {
         return;
     }
@@ -669,7 +709,7 @@ static void *thread_run(void *arg)
             connect_more(c);
 
         /* epoll, wait for events */
-        if ((ret = ss_epoll_wait(sc, ep, evs, num_evs, -1)) < 0) {
+        if ((ret = ss_epoll_wait(sc, ep, evs, num_evs, 0)) < 0) {
             fprintf(stderr, "[%d] epoll_wait failed\n", cn);
             abort();
         }
@@ -808,7 +848,7 @@ int main(int argc, char *argv[])
     if (argc < 5 || argc > 16) {
         fprintf(stderr, "Usage: ./testclient IP PORT CORES CONFIG "
             "[MESSAGE-SIZE] [MAX-PENDING] [TOTAL-CONNS] "
-            "[OPENALL-DELAY] [MAX-MSGS-CONN] [MAX-PEND-CONNS] " 
+            "[OPENALL-DELAY] [MAX-MSGS-CONN] [MAX-PEND-CONNS] [RATE]" 
             "[LATENCY-FILE-DIR] [LATENCY-FILE]\n");
         return EXIT_FAILURE;
     }
@@ -851,11 +891,15 @@ int main(int argc, char *argv[])
     }
 
     if (argc >= 12) {
-        dir_path = argv[11];
+    	rate = atoi(argv[11]);
     }
 
     if (argc >= 13) {
-        file_name = argv[12];
+        dir_path = argv[12];
+    }
+
+    if (argc >= 14) {
+        file_name = argv[13];
     }
 
     assert(sizeof(*cs) % 64 == 0);
