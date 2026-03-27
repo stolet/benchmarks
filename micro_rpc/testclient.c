@@ -92,7 +92,7 @@ static uint32_t max_conn_pending = 16;
 static uint32_t message_size = 64;
 static uint32_t num_conns = 8;
 static uint32_t num_msgs = 0;
-/* Per-connection rate limit in Krequests/s. */
+/* Per-connection rate limit in requests/s. */
 static uint64_t rate = 0;
 static uint32_t openall_delay = 0;
 static struct sockaddr_in *addrs;
@@ -187,17 +187,11 @@ static inline uint64_t get_tsc_hz_calibration(void)
 
 static inline void rate_limit_init(void)
 {
-    uint64_t rate_pps, tsc_hz, scaled_tsc_hz;
+    uint64_t tsc_hz, scaled_tsc_hz;
 
     if (rate == 0) {
         return;
     }
-
-    if (rate > UINT64_MAX / 1000ULL) {
-        fprintf(stderr, "RATE is too large\n");
-        exit(EXIT_FAILURE);
-    }
-    rate_pps = rate * 1000ULL;
 
     tsc_hz = get_tsc_hz_calibration();
     if (tsc_hz == 0) {
@@ -210,16 +204,14 @@ static inline void rate_limit_init(void)
     }
     scaled_tsc_hz = tsc_hz << TOKEN_BUCKET_FP_SHIFT;
 
-    rate_req_cost_fp = div_ceil_u64(scaled_tsc_hz, rate_pps);
+    rate_req_cost_fp = div_ceil_u64(scaled_tsc_hz, rate);
     if (rate_req_cost_fp == 0) {
         rate_req_cost_fp = 1;
     }
-    if (rate > UINT64_MAX / rate_req_cost_fp) {
-        fprintf(stderr, "RATE burst capacity overflows token bucket\n");
-        exit(EXIT_FAILURE);
+    rate_bucket_cap_fp = div_ceil_u64(scaled_tsc_hz, 1000ULL);
+    if (rate_bucket_cap_fp < rate_req_cost_fp) {
+        rate_bucket_cap_fp = rate_req_cost_fp;
     }
-    /* rate is in Kreq/s, so a 1 ms bucket holds exactly rate requests. */
-    rate_bucket_cap_fp = rate * rate_req_cost_fp;
 }
 
 static inline void conn_rate_limit_reset(struct connection *co)
@@ -937,7 +929,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Usage: ./testclient IP PORT CORES CONFIG "
             "[MESSAGE-SIZE] [MAX-PENDING] [TOTAL-CONNS] "
             "[OPENALL-DELAY] [MAX-MSGS-CONN] [MAX-PEND-CONNS] "
-            "[RATE-KREQS/SEC/CONN] "
+            "[RATE-REQS/SEC/CONN] "
             "[LATENCY-FILE-DIR] [LATENCY-FILE]\n");
         return EXIT_FAILURE;
     }
