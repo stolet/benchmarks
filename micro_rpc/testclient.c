@@ -731,6 +731,7 @@ static void save_hist(uint32_t *hist)
   f = fopen(temp_path, "w");
   if (f == NULL)
   {
+    fprintf(stderr, "%s\n", temp_path);
     perror("error opening file");
     exit(-1);
   }
