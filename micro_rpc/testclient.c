@@ -75,6 +75,8 @@
 #define HIST_BUCKETS (1024 * 1024)
 
 #define MAX_FILE_PATH_SIZE 200
+#define NS_PER_SEC 1000000000ULL
+#define TOKEN_BUCKET_FP_SHIFT 8
 
 enum conn_state {
     CONN_CLOSED = 0,
@@ -90,10 +92,14 @@ static uint32_t max_conn_pending = 16;
 static uint32_t message_size = 64;
 static uint32_t num_conns = 8;
 static uint32_t num_msgs = 0;
+/* Per-connection rate limit in Krequests/s. */
+static uint64_t rate = 0;
 static uint32_t openall_delay = 0;
 static struct sockaddr_in *addrs;
 static size_t addrs_num;
 static volatile int start_running = 0;
+static uint64_t rate_req_cost_fp = 0;
+static uint64_t rate_bucket_cap_fp = 0;
 
 struct connection {
     enum conn_state state;
@@ -103,6 +109,8 @@ struct connection {
     uint32_t tx_remain;
     uint32_t rx_remain;
     uint32_t tx_cnt;
+    uint64_t bucket_fp;
+    uint64_t bucket_tsc;
     void *rx_buf;
     void *tx_buf;
     struct sockaddr_in *addr;
@@ -143,6 +151,106 @@ struct core {
 
 static void open_all(struct core *c);
 
+
+static inline uint64_t div_ceil_u64(uint64_t num, uint64_t den)
+{
+    return num / den + (num % den != 0);
+}
+
+static inline uint64_t get_tsc_hz_calibration(void)
+{
+    struct timespec ts_before, ts_after;
+    uint64_t cycles, elapsed_ns;
+
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts_before) != 0) {
+        fprintf(stderr, "get_tsc_hz_calibration: clock_gettime failed for start\n");
+        return 0;
+    }
+
+    cycles = util_rdtsc();
+    usleep(10000);
+    cycles = util_rdtsc() - cycles;
+
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts_after) != 0) {
+        fprintf(stderr, "get_tsc_hz_calibration: clock_gettime failed for end\n");
+        return 0;
+    }
+
+    elapsed_ns = ((uint64_t) ts_after.tv_sec * NS_PER_SEC + ts_after.tv_nsec) -
+        ((uint64_t) ts_before.tv_sec * NS_PER_SEC + ts_before.tv_nsec);
+    if (elapsed_ns == 0) {
+        return 0;
+    }
+
+    return div_ceil_u64(cycles * NS_PER_SEC, elapsed_ns);
+}
+
+static inline void rate_limit_init(void)
+{
+    uint64_t rate_pps, tsc_hz, scaled_tsc_hz;
+
+    if (rate == 0) {
+        return;
+    }
+
+    if (rate > UINT64_MAX / 1000ULL) {
+        fprintf(stderr, "RATE is too large\n");
+        exit(EXIT_FAILURE);
+    }
+    rate_pps = rate * 1000ULL;
+
+    tsc_hz = get_tsc_hz_calibration();
+    if (tsc_hz == 0) {
+        fprintf(stderr, "TSC calibration failed\n");
+        exit(EXIT_FAILURE);
+    }
+    if (tsc_hz > (UINT64_MAX >> TOKEN_BUCKET_FP_SHIFT)) {
+        fprintf(stderr, "TSC frequency is too large for token bucket scaling\n");
+        exit(EXIT_FAILURE);
+    }
+    scaled_tsc_hz = tsc_hz << TOKEN_BUCKET_FP_SHIFT;
+
+    rate_req_cost_fp = div_ceil_u64(scaled_tsc_hz, rate_pps);
+    if (rate_req_cost_fp == 0) {
+        rate_req_cost_fp = 1;
+    }
+    if (rate > UINT64_MAX / rate_req_cost_fp) {
+        fprintf(stderr, "RATE burst capacity overflows token bucket\n");
+        exit(EXIT_FAILURE);
+    }
+    /* rate is in Kreq/s, so a 1 ms bucket holds exactly rate requests. */
+    rate_bucket_cap_fp = rate * rate_req_cost_fp;
+}
+
+static inline void conn_rate_limit_reset(struct connection *co)
+{
+    co->bucket_fp = rate_bucket_cap_fp;
+    co->bucket_tsc = util_rdtsc();
+}
+
+static inline void conn_rate_limit_refill(struct connection *co, uint64_t now_tsc)
+{
+    uint64_t elapsed_tsc, missing_fp, missing_tsc;
+
+    elapsed_tsc = now_tsc - co->bucket_tsc;
+    if (elapsed_tsc == 0) {
+        return;
+    }
+
+    co->bucket_tsc = now_tsc;
+    if (co->bucket_fp >= rate_bucket_cap_fp) {
+        return;
+    }
+
+    missing_fp = rate_bucket_cap_fp - co->bucket_fp;
+    missing_tsc = div_ceil_u64(missing_fp, 1ULL << TOKEN_BUCKET_FP_SHIFT);
+    if (elapsed_tsc >= missing_tsc) {
+        co->bucket_fp = rate_bucket_cap_fp;
+        return;
+    }
+
+    co->bucket_fp += elapsed_tsc << TOKEN_BUCKET_FP_SHIFT;
+}
 
 static inline uint64_t get_nanos(void)
 {
@@ -238,6 +346,7 @@ static inline void conn_connect(struct core *c, struct connection *co)
     co->tx_cnt = 0;
     co->rx_remain = message_size;
     co->tx_remain = message_size;
+    conn_rate_limit_reset(co);
 #ifdef PRINT_STATS
     co->cnt = 0;
 #endif
@@ -310,6 +419,7 @@ static void prepare_core(struct core *c)
         c->conns[i].state = CONN_CLOSED;
         c->conns[i].fd = -1;
         c->conns[i].addr = &addrs[next_addr];
+        conn_rate_limit_reset(&c->conns[i]);
 
         c->conns[i].next_closed = c->closed_conns;
         c->closed_conns = &c->conns[i];
@@ -409,13 +519,18 @@ static inline int conn_send(struct core *c, struct connection *co)
 {
     int fd, ret, wait_wr;
     int cn;
-    uint64_t *tx_ts;
+    uint64_t *tx_ts, now_tsc;
     void *tx_buf;
     ssctx_t sc;
     ss_epev_t ev;
 #ifdef PRINT_STATS
     uint64_t tsc;
 #endif
+
+    if (rate > 0) {
+        now_tsc = util_rdtsc();
+        conn_rate_limit_refill(co, now_tsc);
+    }
 
     sc = c->sc;
     cn = c->id;
@@ -428,6 +543,14 @@ static inline int conn_send(struct core *c, struct connection *co)
     while ((co->pending < max_pending || max_pending == 0) &&
         (co->tx_cnt < num_msgs || num_msgs == 0) && ret > 0)
     {
+        if (rate > 0 && co->tx_remain == message_size &&
+                co->bucket_fp < rate_req_cost_fp)
+        {
+            wait_wr = 1;
+            assert(co->tx_remain == message_size);
+            break;
+        }
+
         /* timestamp if starting a new message */
         if (co->tx_remain == message_size) {
             *tx_ts = get_nanos();
@@ -451,6 +574,10 @@ static inline int conn_send(struct core *c, struct connection *co)
                 /* sent whole message */
                 co->pending++;
                 co->tx_cnt++;
+                if (rate > 0) {
+                    assert(co->bucket_fp >= rate_req_cost_fp);
+                    co->bucket_fp -= rate_req_cost_fp;
+                }
                 co->tx_remain = message_size;
                 if ((co->pending < max_pending || max_pending == 0) &&
                     (co->tx_cnt < num_msgs || num_msgs == 0))
@@ -814,7 +941,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Usage: ./testclient IP PORT CORES CONFIG "
             "[MESSAGE-SIZE] [MAX-PENDING] [TOTAL-CONNS] "
             "[OPENALL-DELAY] [MAX-MSGS-CONN] [MAX-PEND-CONNS] "
-            "[BURSTY] [BURST-LENGTH] [BURST-INTERVAL] "
+            "[RATE-KREQS/SEC/CONN] "
             "[LATENCY-FILE-DIR] [LATENCY-FILE]\n");
         return EXIT_FAILURE;
     }
@@ -857,12 +984,18 @@ int main(int argc, char *argv[])
     }
 
     if (argc >= 12) {
-        dir_path = argv[11];
+        rate = strtoull(argv[11], NULL, 10);
     }
 
     if (argc >= 13) {
-        file_name = argv[12];
+        dir_path = argv[12];
     }
+
+    if (argc >= 14) {
+        file_name = argv[13];
+    }
+
+    rate_limit_init();
 
     assert(sizeof(*cs) % 64 == 0);
     cs = calloc(num_threads, sizeof(*cs));
