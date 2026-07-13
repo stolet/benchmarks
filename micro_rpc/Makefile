@@ -1,7 +1,7 @@
 TARGETS = echoserver_linux testclient_linux testclient_linux_bursty testclient_linux_open_latency \
       echoserver_ll echoserver_mtcp testclient_mtcp
 
-TAS_CODE?=/workspaces/o-tas/tas
+TAS_CODE?=/workspaces/tas
 
 CPPFLAGS+= -I$(TAS_CODE)/include
 CFLAGS = -std=gnu99 -g -Wall -O3 -march=native \
