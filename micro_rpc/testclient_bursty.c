@@ -816,11 +816,9 @@ static void *thread_run(void *arg)
             if (burst_dur > burst_length && burst_mode == 1) {
                 burst_mode = 0;
                 burst_end = util_rdtsc();
-                fprintf(stderr, "ending burst burst_dur=%ld\n", burst_dur);
             } else if (inter_dur > burst_interval && burst_mode == 0) {
                 burst_mode = 1;
                 burst_start = util_rdtsc();
-                fprintf(stderr, "ending interval interval_dur=%ld\n", inter_dur);
             }
 
             for (i = 0; i < ret; i++) {
