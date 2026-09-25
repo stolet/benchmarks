@@ -371,14 +371,18 @@ static inline void queue_fire(struct qman_thread *t,
 
 static inline uint32_t timestamp(void)
 {
-  static uint64_t freq = 0;
   uint64_t cycles = util_rdtsc();
+  static uint64_t freq = 0;
+  uint64_t seconds = cycles / freq;
+  uint64_t remainder = cycles % freq;
 
   if (freq == 0)
     freq = get_tsc_hz();
 
-  cycles *= 1000000000ULL;
-  cycles /= freq;
+  seconds = cycles / freq;
+  remainder = cycles % freq;
+  
+  cycles = seconds * 1000000000ULL + remainder * 1000000000ULL / freq;    
   return cycles;
 }
 

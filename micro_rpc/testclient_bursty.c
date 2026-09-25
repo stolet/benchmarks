@@ -151,6 +151,23 @@ struct core {
 
 static void open_all(struct core *c, uint8_t burst_mode);
 
+uint64_t tsc_us = 0;
+static inline void calibrate_tsc()
+{
+  struct timespec start, end;
+  uint64_t tsc_start, tsc_end;
+  uint64_t elapsed_tsc, elapsed_us;
+
+  clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+  tsc_start = util_rdtsc();
+  usleep(10000);
+  tsc_end = util_rdtsc();
+  clock_gettime(CLOCK_MONOTONIC_RAW, &end);
+  elapsed_tsc = tsc_end - tsc_start;
+  elapsed_us = (end.tv_sec - start.tv_sec) * 1000000UL 
+      + (end.tv_nsec - start.tv_nsec) / 1000;
+  tsc_us = elapsed_tsc / elapsed_us;
+}
 
 static inline uint64_t get_nanos(void)
 {
@@ -758,8 +775,8 @@ static void *thread_run(void *arg)
     int i, j, cn, ret, ep, num_evs, n_send;
     unsigned int n_msgs;
     struct connection *co;
-    struct timeval cur_ts;
-    time_t burst_start = 0, burst_end = 0;
+    uint64_t burst_dur, inter_dur;
+    uint64_t now, burst_start = 0, burst_end = 0;
     ssctx_t sc;
     ss_epev_t *evs;
     uint8_t burst_mode = 0;
@@ -771,8 +788,7 @@ static void *thread_run(void *arg)
         while (!start_running);
     }
     
-    gettimeofday(&cur_ts, NULL);
-    burst_end = cur_ts.tv_usec;
+    burst_end = util_rdtsc();
 
     cn = c->id;
     ep = c->ep;
@@ -794,15 +810,17 @@ static void *thread_run(void *arg)
         }
 
         if (ret > 0) {
-            gettimeofday(&cur_ts, NULL);
-            if ((cur_ts.tv_usec - burst_start > burst_length) 
-                    && burst_mode == 1) {
+            now = util_rdtsc();
+            burst_dur = (now - burst_start) / tsc_us;
+            inter_dur = (now - burst_end) / tsc_us;
+            if (burst_dur > burst_length && burst_mode == 1) {
                 burst_mode = 0;
-                burst_end = cur_ts.tv_usec;
-            } else if ((cur_ts.tv_usec - burst_end > burst_interval) 
-                    && burst_mode == 0) {
+                burst_end = util_rdtsc();
+                fprintf(stderr, "ending burst burst_dur=%ld\n", burst_dur);
+            } else if (inter_dur > burst_interval && burst_mode == 0) {
                 burst_mode = 1;
-                burst_start = cur_ts.tv_usec;
+                burst_start = util_rdtsc();
+                fprintf(stderr, "ending interval interval_dur=%ld\n", inter_dur);
             }
 
             for (i = 0; i < ret; i++) {
@@ -966,7 +984,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "allocating total histogram failed\n");
         abort();
     }
-
+  
+    calibrate_tsc();
 
     for (i = 0; i < num_threads; i++) {
         cs[i].id = i;
